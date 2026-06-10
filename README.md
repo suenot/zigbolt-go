@@ -7,7 +7,7 @@ This package wraps ZigBolt's C-ABI shared library via cgo.
 ## Prerequisites
 
 - Go 1.21+
-- ZigBolt shared library (`libzigbolt.so` / `libzigbolt.dylib`) installed and visible to the linker
+- ZigBolt shared library (`libzigbolt.so` / `libzigbolt.dylib`)
 - The ZigBolt header is bundled in this package (`zigbolt.h`)
 
 ### Building ZigBolt from source
@@ -15,10 +15,21 @@ This package wraps ZigBolt's C-ABI shared library via cgo.
 ```bash
 cd /path/to/zigbolt
 zig build -Doptimize=ReleaseFast
-# Install the shared library where the linker can find it, e.g.:
-sudo cp zig-out/lib/libzigbolt.so /usr/local/lib/   # Linux
-sudo cp zig-out/lib/libzigbolt.dylib /usr/local/lib/ # macOS
-sudo ldconfig  # Linux only
+# produces zig-out/lib/libzigbolt.{so,dylib}
+```
+
+### Library location
+
+By default the cgo directives look for the library in the sibling checkout
+(`../zigbolt/zig-out/lib`) and embed a matching rpath, so the examples and
+tests link and run out of the box with no environment setup.
+
+If your library lives elsewhere, pass extra linker flags via `CGO_LDFLAGS`
+(cgo flags are resolved at compile time, so the runtime `ZIGBOLT_LIB_PATH`
+variable used by the dynamic-loading bindings does not apply here):
+
+```bash
+CGO_LDFLAGS="-L/path/to/lib -Wl,-rpath,/path/to/lib" go build ./...
 ```
 
 ## Installation
@@ -91,7 +102,9 @@ fmt.Printf("ZigBolt %d.%d.%d\n", major, minor, patch)
 | `(*IpcChannel).Poll(handler, limit)` | Receive up to `limit` messages |
 | `(*IpcChannel).Close()` | Release channel resources |
 | `(*Transport).Close()` | Release transport resources |
-| `Version()` | Get library version (major, minor, patch) |
+| `Version()` | Get native library version (major, minor, patch) |
+| `BindingVersion` | Version of these Go bindings (`"0.2.1"`) |
+| `DefaultTermLength` | Default term length, 1 MiB (`1 << 20`) |
 
 ## Examples
 

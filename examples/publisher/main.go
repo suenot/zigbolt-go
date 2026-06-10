@@ -14,9 +14,8 @@ func main() {
 	fmt.Printf("ZigBolt version: %d.%d.%d\n", major, minor, patch)
 
 	const channelName = "/zigbolt-go-example"
-	const termLength = 1024 * 1024 // 1 MiB
 
-	ch, err := zigbolt.CreateChannel(channelName, termLength)
+	ch, err := zigbolt.CreateChannel(channelName, zigbolt.DefaultTermLength)
 	if err != nil {
 		log.Fatalf("CreateChannel: %v", err)
 	}

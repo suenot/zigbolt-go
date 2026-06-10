@@ -3,20 +3,54 @@
 package zigbolt
 
 /*
-#cgo LDFLAGS: -lzigbolt
+#cgo LDFLAGS: -L${SRCDIR}/../zigbolt/zig-out/lib -L${SRCDIR}/../../zig-out/lib -lzigbolt
+#cgo LDFLAGS: -Wl,-rpath,${SRCDIR}/../zigbolt/zig-out/lib -Wl,-rpath,${SRCDIR}/../../zig-out/lib
 #include "zigbolt.h"
 #include <stdlib.h>
+#include <stdint.h>
 
-// Gateway C callback that forwards to Go.
-extern void goFragmentHandler(const uint8_t* data, uint32_t len, int32_t msg_type_id);
+// Prototype of the Go callback exported from callback.go. This must match
+// the cgo-generated declaration EXACTLY (cgo generates a non-const
+// `uint8_t*` for a `*C.uint8_t` parameter — declaring `const uint8_t*`
+// here would be a compile error: "conflicting types for 'goFragmentHandler'").
+extern void goFragmentHandler(uint8_t* data, uint32_t len, int32_t msg_type_id, uintptr_t handle);
+
+// ZigBolt's fragment callback is a bare function pointer with no user-data
+// argument, so the per-call context (a runtime/cgo.Handle) is carried in a
+// C thread-local instead of a Go package-global. zigbolt_poll invokes the
+// callback synchronously on the calling thread, so:
+//   - polls on independent channels from different goroutines never share
+//     state (each OS thread has its own slot), and
+//   - a nested/reentrant Poll from inside a handler simply saves and
+//     restores the slot like a stack frame.
+static _Thread_local uintptr_t zb_current_handle;
+
+static void zb_trampoline(const uint8_t* data, uint32_t len, int32_t msg_type_id) {
+	goFragmentHandler((uint8_t*)data, len, msg_type_id, zb_current_handle);
+}
+
+static uint32_t zb_poll(void* handle, uintptr_t go_handle, uint32_t limit) {
+	uintptr_t prev = zb_current_handle;
+	zb_current_handle = go_handle;
+	uint32_t n = zigbolt_poll(handle, zb_trampoline, limit);
+	zb_current_handle = prev;
+	return n;
+}
 */
 import "C"
 
 import (
 	"errors"
-	"sync"
+	"runtime/cgo"
 	"unsafe"
 )
+
+// BindingVersion is the version of these Go bindings.
+const BindingVersion = "0.2.1"
+
+// DefaultTermLength is the default ring-buffer term length (1 MiB),
+// unified across all ZigBolt bindings.
+const DefaultTermLength uint32 = 1 << 20
 
 // FragmentHandler is called for each message fragment received during Poll.
 type FragmentHandler func(data []byte, msgTypeId int32)
@@ -106,35 +140,19 @@ func (ch *IpcChannel) Publish(data []byte, msgTypeId int32) error {
 	return nil
 }
 
-// pollMu protects the global handler during a Poll call.
-// ZigBolt's C callback is a plain function pointer with no user-data argument,
-// so we route through a global variable guarded by this mutex.
-var (
-	pollMu      sync.Mutex
-	pollHandler FragmentHandler
-)
-
-//export goFragmentHandler
-func goFragmentHandler(data *C.uint8_t, length C.uint32_t, msgTypeId C.int32_t) {
-	if pollHandler == nil {
-		return
-	}
-	// Create a Go slice backed by C memory — valid only for the duration of this callback.
-	buf := C.GoBytes(unsafe.Pointer(data), C.int(length))
-	pollHandler(buf, int32(msgTypeId))
-}
-
 // Poll reads up to `limit` message fragments from the channel and invokes
 // handler for each one. Returns the number of fragments read.
+//
+// The handler is passed per call via a runtime/cgo.Handle carried in a C
+// thread-local, so concurrent Polls on independent channels do not block
+// each other and a Poll from inside a handler (reentrant poll) is safe.
 func (ch *IpcChannel) Poll(handler FragmentHandler, limit uint32) uint32 {
-	if ch.handle == nil {
+	if ch.handle == nil || handler == nil {
 		return 0
 	}
-	pollMu.Lock()
-	pollHandler = handler
-	n := C.zigbolt_poll(ch.handle, C.zigbolt_fragment_handler_t(C.goFragmentHandler), C.uint32_t(limit))
-	pollHandler = nil
-	pollMu.Unlock()
+	h := cgo.NewHandle(handler)
+	defer h.Delete()
+	n := C.zb_poll(ch.handle, C.uintptr_t(h), C.uint32_t(limit))
 	return uint32(n)
 }
 
